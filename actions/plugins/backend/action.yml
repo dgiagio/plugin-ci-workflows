@@ -1,11 +1,27 @@
 name: Plugins - Backend - Test and build
 description: Tests, lints and builds the backend.
 
+inputs:
+  go-private:
+    description: Same as GOPRIVATE environment variable, used by go to enable the use of private repositories
+    required: false
+    default: ""
+
 runs:
   using: composite
   steps:
-    - name: Install dependencies
-      run: go mod download
+    - name: Generate GitHub token
+      if: ${{ inputs.go-private != '' }}
+      id: generate-github-token
+      uses: actions/create-github-app-token@v1.11.5
+      with:
+        app-id: ${{ env.GITHUB_APP_ID }}
+        private-key: ${{ env.GITHUB_APP_PRIVATE_KEY }}
+        owner: ${{ github.repository_owner }}
+
+    - name: Config git to use GitHub token
+      if: ${{ inputs.go-private != '' }}
+      run: git config --system url."https://${{ steps.generate-github-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
       shell: bash
 
     - name: Lint

@@ -130,23 +130,12 @@ on:
       zips:
         value: ${{ jobs.test-and-build.outputs.zips }}
 
-      gcs-zip-urls-latest:
-        value: ${{ jobs.upload-to-gcs.outputs.zip-urls-latest }}
-      gcs-zip-urls-commit:
-        value: ${{ jobs.upload-to-gcs.outputs.zip-urls-commit }}
-
-      gcs-universal-zip-url-latest:
-        value: ${{ jobs.upload-to-gcs.outputs.universal-zip-url-latest }}
-      gcs-universal-zip-url-commit:
-        value: ${{ jobs.upload-to-gcs.outputs.universal-zip-url-commit }}
-
 concurrency:
   group: ci-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read
-  id-token: write
 
 env:
   # Default versions for tooling
@@ -159,6 +148,8 @@ env:
   VAULT_INSTANCE: ops
 
   IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+
+  GOPRIVATE: ""
 
 jobs:
   test-and-build:
@@ -226,7 +217,9 @@ jobs:
 
       - name: Test and build backend
         if: ${{ steps.check-for-backend.outputs.has-backend == 'true' }}
-        uses: grafana/plugin-ci-workflows/actions/plugins/backend@main
+        uses: dgiagio/plugin-ci-workflows/actions/plugins/backend@dgiagio/goprivate-support
+        with:
+          go-private: ${{ env.GOPRIVATE || '' }}
 
       - name: Package universal ZIP
         id: universal-zip
@@ -316,125 +309,3 @@ jobs:
 
       - name: Test docs
         uses: grafana/plugin-ci-workflows/actions/plugins/docs/test@main
-
-  playwright:
-    name: Playwright E2E tests
-    uses: grafana/plugin-ci-workflows/.github/workflows/playwright.yml@main
-    if: ${{ inputs.run-playwright == true }}
-    needs:
-      - test-and-build
-
-    with:
-      id: ${{ fromJSON(needs.test-and-build.outputs.plugin).id}}
-      version: ${{ fromJSON(needs.test-and-build.outputs.plugin).version}}
-      grafana-dependency: ${{ inputs.run-playwright-with-grafana-dependency }}
-      skip-grafana-dev-image: ${{ inputs.run-playwright-with-skip-grafana-dev-image }}
-      version-resolver-type: ${{ inputs.run-playwright-with-version-resolver-type }}
-      upload-artifacts: ${{ inputs.upload-playwright-artifacts }}
-
-  upload-to-gcs:
-    name: Upload to GCS
-    runs-on: ubuntu-latest
-
-    # Skip the GCS upload for PRs from forks (no access to the GCS bucket)
-    # This is equivalent to !env.IS_FORK (we don't have access to the env context at this level)
-    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
-
-    permissions:
-      contents: read
-      id-token: write
-
-    needs:
-      - test-and-build
-
-    outputs:
-      zip-urls-latest: ${{ steps.outputs.outputs.zip_urls_latest }}
-      zip-urls-commit: ${{ steps.outputs.outputs.zip_urls_commit }}
-
-      universal-zip-url-latest: ${{ steps.outputs.outputs.universal_zip_url_latest }}
-      universal-zip-url-commit: ${{ steps.outputs.outputs.universal_zip_url_commit }}
-
-    steps:
-      - name: Download GitHub artifact
-        uses: actions/download-artifact@v4.1.9
-        with:
-          name: dist-artifacts
-          path: /tmp/dist-artifacts
-
-      - name: Login to Google Cloud
-        uses: google-github-actions/auth@v2.1.8
-        with:
-          workload_identity_provider: "projects/304398677251/locations/global/workloadIdentityPools/github/providers/github-provider"
-          service_account: github-plugin-ci-workflows@grafanalabs-workload-identity.iam.gserviceaccount.com
-
-      - name: Determine GCS artifacts paths
-        run: |
-          plugin_version='${{ fromJSON(needs.test-and-build.outputs.plugin).version }}'
-          # Strip the SHA suffix from the version, if present.
-          plugin_version="${plugin_version%%+*}"
-          gcs_artifacts_base="${{ env.GCS_ARTIFACTS_BUCKET }}/${{ fromJSON(needs.test-and-build.outputs.plugin).id }}/$plugin_version"
-          echo "gcs_artifacts_path_latest=$gcs_artifacts_base/main/latest" >> "$GITHUB_ENV"
-          echo "gcs_artifacts_path_commit=$gcs_artifacts_base/${{ github.event.pull_request.base.ref || 'main' }}/${{ github.event.pull_request.head.sha || github.sha }}" >> "$GITHUB_ENV"
-        shell: bash
-
-      - name: Upload GCS artifacts (latest)
-        id: gcs-upload-latest
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main'}}
-        uses: google-github-actions/upload-cloud-storage@v2.2.2
-        with:
-          path: /tmp/dist-artifacts
-          destination: ${{ env.gcs_artifacts_path_latest }}
-          parent: false
-          process_gcloudignore: false
-
-      - name: Upload GCS artifacts (commit)
-        id: gcs-upload-commit
-        uses: google-github-actions/upload-cloud-storage@v2.2.2
-        with:
-          path: /tmp/dist-artifacts
-          destination: ${{ env.gcs_artifacts_path_commit }}
-          parent: false
-          process_gcloudignore: false
-
-      - name: Define outputs
-        id: outputs
-        run: |
-          gcs_prefix="https://storage.googleapis.com/${{ env.GCS_ARTIFACTS_BUCKET }}"
-
-          zip_urls_latest=$(jq -n '[]')
-          files='${{ steps.gcs-upload-latest.outputs.uploaded }}'
-          echo files: $files
-
-          IFS=','
-          for file in $files; do
-            if [[ ! $file == *.zip ]]; then
-              continue
-            fi
-            gcs_url="$gcs_prefix/$file"
-            zip_urls_latest=$(echo "$zip_urls_latest" | jq -c --arg x "$gcs_url" '. + [$x]')
-          done
-          unset IFS
-
-          zip_urls_commit=$(jq -n '[]')
-          files='${{ steps.gcs-upload-commit.outputs.uploaded }}'
-          echo files: $files
-
-          IFS=','
-          for file in $files; do
-            if [[ ! $file == *.zip ]]; then
-              continue
-            fi
-            gcs_url="$gcs_prefix/$file"
-            zip_urls_commit=$(echo "$zip_urls_commit" | jq -c --arg x "$gcs_url" '. + [$x]')
-          done
-          unset IFS
-
-          echo zip_urls_latest="$zip_urls_latest" >> "$GITHUB_OUTPUT"
-          echo zip_urls_commit="$zip_urls_commit" >> "$GITHUB_OUTPUT"
-
-          universal_zip_file_name=$(basename "${{ needs.test-and-build.outputs.universal-zip }}")
-          if [ -n "$universal_zip_file_name" ]; then
-            echo universal_zip_url_latest="$gcs_artifacts_path_latest/$universal_zip_file_name" >> "$GITHUB_OUTPUT"
-            echo universal_zip_url_commit="$gcs_artifacts_path_commit/$universal_zip_file_name" >> "$GITHUB_OUTPUT"
-          fi
-        shell: bash
